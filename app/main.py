@@ -13,6 +13,7 @@ from app.migration import DecisionError, apply_decisions, migrate_annotations
 from app.nesting import NestingError, audit_nesting, export_nesting, validate_rules
 from app.relabel import RelabelError, export_labels, migrate_labels, validate_relabel_rules
 from app.review import ReviewError, apply_reviews, build_fragments, to_jsonl
+from app.redaction import RedactionError, redact_export
 from app.sequence import SequenceError, build_sequence
 from app.units import UnitsError, convert_offsets, preview_offsets
 from app.validation import ARBITRATE, LABELED, MIGRATE, RELABEL, REVIEW, UNITS, validate
@@ -155,6 +156,12 @@ class RelabelRequest(BaseModel):
     text: str
     annotations: list[RelabelAnnotationIn] = []
     rules: RelabelRulesIn = RelabelRulesIn()
+
+
+class RedactionRequest(BaseModel):
+    text: str
+    annotations: list[ArbAnnotationIn] = []
+    mask_labels: list[str]
 
 
 @app.get("/")
@@ -363,6 +370,17 @@ def relabel_export(req: RelabelRequest):
             "errors": result["errors"],
         })
     return {"annotations": result["annotations"], "count": len(result["annotations"])}
+
+
+@app.post("/api/redact/export")
+def redact(req: RedactionRequest):
+    (anns,) = validate(req, LABELED)
+    try:
+        result = redact_export(req.text, anns, req.mask_labels)
+    except RedactionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {"text": result["text"], "annotations": result["annotations"],
+            "mask_count": result["mask_count"]}
 
 
 def _validate_rules(rules: RulesIn) -> dict:

@@ -1,6 +1,6 @@
 # 批注迁移台
 
-本地 Web 应用：把旧版文本上的批注（`id`、`start`、`end`）迁移到新版文本；内置**批注集仲裁**模块，对同一文本上的左右两组批注做冲突裁决；提供**序列标注语料导出**模块，把文本与批注切分为 token 并分层生成 BILOU 标签，导出 CoNLL 语料；提供**嵌套批注审计**模块，按结构规则校验嵌套批注并导出稳定嵌套 JSON；提供**批注偏移制式转换**模块，在 codepoint / UTF-16 / UTF-8 字节三种偏移制式间互转并逐字符边界校验；提供**批注审阅切片**模块，把批注按窗口上限顺序装箱为审阅切片、导出 JSONL，并校验回导的审阅结果；并提供**批注标签体系迁移**模块，按声明顺序的规则链（`pattern` 用 `re.fullmatch` 匹配批注原文）把批注 label 迁移到目标标签体系。
+本地 Web 应用：把旧版文本上的批注（`id`、`start`、`end`）迁移到新版文本；内置**批注集仲裁**模块，对同一文本上的左右两组批注做冲突裁决；提供**序列标注语料导出**模块，把文本与批注切分为 token 并分层生成 BILOU 标签，导出 CoNLL 语料；提供**嵌套批注审计**模块，按结构规则校验嵌套批注并导出稳定嵌套 JSON；提供**批注偏移制式转换**模块，在 codepoint / UTF-16 / UTF-8 字节三种偏移制式间互转并逐字符边界校验；提供**批注审阅切片**模块，把批注按窗口上限顺序装箱为审阅切片、导出 JSONL，并校验回导的审阅结果；并提供**批注标签体系迁移**模块，按声明顺序的规则链（`pattern` 用 `re.fullmatch` 匹配批注原文）把批注 label 迁移到目标标签体系；另提供**可分享文本的遮盖导出**接口，按标签把命中区间替换为「[遮盖]」，合并相接 / 重叠命中区，并把其余批注跨遮盖区拆成带新码点范围的可见片段。
 
 - 后端：FastAPI；前端：原生 HTML / CSS / JavaScript（无构建步骤）
 - 除制式转换模块外，其余模块偏移一律按 **Unicode 码点** 计算，区间为左闭右开 **[start, end)**
@@ -154,6 +154,26 @@
   label**；
 - 非法区间、空 `label`、重复 `id` 返回 **422**；空 / 重复目标标签、空 `from` / `to`、
   非法正则、回退规则冲突（同一 `from` 多条或未排最后）同样返回 **422**。
+
+## 可分享文本遮盖导出（/api/redact/export）
+
+输入文本、一组批注（每条含唯一 `id`、`start`、`end`、`label`，区间为 Unicode 码点
+**[start, end)**）与需遮盖的标签列表 `mask_labels`：
+
+- 收集 label 命中 `mask_labels` 的批注区间，按起点排序后只要**重叠或相接**
+  （左闭右开下端点相等即相接）就合并为一个**遮盖区**；
+- 每个遮盖区在导出文本中整体替换为固定标记 **`[遮盖]`**（4 个码点），命中标签的
+  批注本身**不导出**；
+- 其余批注跨遮盖区时按遮盖区边界切成**可见片段**，完全落在遮盖区内的舍弃；
+  片段保留 `label`、`source_id`（原批注 `id`）与**从 1 开始**的片段序号
+  `fragment_index`，同一批注内按原文位置编号；
+- 片段总体按**原批注输入顺序**排列（同一批注内按原文位置），不做全局位置重排；
+- 返回新文本与片段在新文本中的码点范围；片段范围内文字必为原文的可见部分，
+  **不含遮盖标记**；
+- `mask_labels` 为空或没有任何命中标签时，不产生遮盖区，**文本与批注范围原样不变**
+  （每条批注输出为一个 `fragment_index=1` 的片段）；
+- 非法区间、空 `label`、重复 `id` 以及空 / 重复的遮盖标签均返回 **422**，
+  不返回部分结果。
 
 ## 快速开始（容器一键拉起）
 
@@ -444,6 +464,42 @@ JSON」得到：
 **禁止导出**（导出接口返回 **409**）。自环规则 `{ "from": "坏", "to": "坏" }` 同样
 立即构成循环；label 不在 `target_labels` 且没有可用规则时记 `no_rule` 错误。
 
+## 遮盖导出示例（相接遮盖区 + 跨区批注）
+
+文本 `联系人：张三110101199001011234，备注已核验。`，批注 JSON：
+
+```json
+[
+  { "id": "n", "start": 4, "end": 6, "label": "人名" },
+  { "id": "i", "start": 6, "end": 24, "label": "证件号" },
+  { "id": "r", "start": 1, "end": 31, "label": "整句" }
+]
+```
+
+- `n [4,6)` 是「张三」，`i [6,24)` 是 18 位身份证号，二者**端点相接**（`n.end == i.start`）
+  → 合并为**一个**遮盖区 `[4,24)`，新文本里只放一个 `[遮盖]`；
+- 命中批注 `n`、`i` **不导出**；
+- `r [1,31)` 是「系人：张三…备注已核验。」，**跨越**遮盖区 → 切成两个可见片段：
+  遮盖区前的「系人：」与遮盖区后的「，备注已核验。」，`fragment_index` 分别为 1、2；
+- 片段的 `start` / `end` 是新文本中的码点范围，切片即原文可见部分，不含 `[遮盖]`。
+
+`POST /api/redact/export`，`mask_labels=["人名","证件号"]`，返回：
+
+```json
+{
+  "text": "联系人：[遮盖]，备注已核验。",
+  "annotations": [
+    { "source_id": "r", "label": "整句", "start": 1, "end": 4, "fragment_index": 1 },
+    { "source_id": "r", "label": "整句", "start": 8, "end": 15, "fragment_index": 2 }
+  ],
+  "mask_count": 1
+}
+```
+
+核对：新文本 `[1,4)` =「系人：」、`[8,15)` =「，备注已核验。」，均不含遮盖标记。
+若 `mask_labels` 传 `["不存在的标签"]`（无命中），则 `text` 与各批注范围原样不变，
+每条批注输出为 `fragment_index=1` 的单片段。
+
 ## API
 
 | 方法 | 路径 | 说明 |
@@ -463,6 +519,7 @@ JSON」得到：
 | POST | `/api/review/import` | 同上加 `reviews:[{fragment_id, sha256, decisions:[{id, action:"keep"｜"drop"｜"correct", start?, end?}]}]`；后端重新切片并校验 fragment_id、摘要与归属，要求每个 id 恰好提交一次、修正范围落在窗口内，任一错误返回 **422** 并列出 `errors`（整批拒绝），否则返回 `{annotations(全局坐标，含 action 与 fragment_id), dropped, count}` |
 | POST | `/api/relabel/preview` | 入参 `{text, annotations:[{id,start,end,label,…}], rules:{target_labels:[…], rules:[{from,to,pattern?}]}}`，返回 `{items:[{id,start,end,text,source_label,final_label,chain,steps,status,errors}], errors, target_labels}`——逐条迁移链（含命中规则）与逐项错误（`no_rule` / `cycle`）；非法区间 / 空 label / 重复 id / 规则集非法（空或重复目标标签、空 from/to、非法正则、回退规则冲突）均返回 **422** |
 | POST | `/api/relabel/export` | 同上；后端重新求值迁移链，存在逐项错误时返回 **409** 并列出 `errors`，否则返回 `{annotations, count}`——保持输入顺序与 id、范围、其余字段不变，只替换 label |
+| POST | `/api/redact/export` | 入参 `{text, annotations:[{id,start,end,label}], mask_labels:[标签…]}`；命中 `mask_labels` 的区间重叠或相接即合并为遮盖区并整体替换为 `[遮盖]`（命中批注不导出），其余批注跨遮盖区切成可见片段，返回 `{text, annotations:[{source_id,label,start,end,fragment_index}], mask_count}`——片段按原批注顺序及原文位置排列，新范围内文字是原文可见部分、不含遮盖标记；无命中时文本与批注范围不变；非法区间 / 空 label / 重复 id / 空或重复遮盖标签均返回 **422** |
 
 迁移导出条目状态取值：`shifted` / `matched` / `disambiguated` / `manual` / `abandoned`（废弃项 `start`、`end` 为 `null`）。
 
@@ -598,6 +655,20 @@ curl -s http://localhost:8000/api/relabel/export \
                          {"from":"旧-对象","to":"流程"}]}}'
 ```
 
+```bash
+# 遮盖导出：人名 [4,6) 与身份证号 [6,24) 相接合并为一个遮盖区；
+# 整句批注跨遮盖区拆成两个可见片段（坐标为新文本码点范围）
+curl -s http://localhost:8000/api/redact/export \
+  -H 'Content-Type: application/json' \
+  --data-binary @- <<'JSON'
+{"text":"联系人：张三110101199001011234，备注已核验。",
+ "mask_labels":["人名","证件号"],
+ "annotations":[{"id":"n","start":4,"end":6,"label":"人名"},
+                {"id":"i","start":6,"end":24,"label":"证件号"},
+                {"id":"r","start":1,"end":31,"label":"整句"}]}
+JSON
+```
+
 ## 本地开发（不用容器）
 
 ```bash
@@ -616,7 +687,7 @@ python -m pytest tests/
 
 ```
 app/
-  main.py            # FastAPI 入口与接口（迁移 + 仲裁 + 序列标注 + 嵌套审计 + 制式转换 + 审阅切片 + 标签体系迁移）
+  main.py            # FastAPI 入口与接口（迁移 + 仲裁 + 序列标注 + 嵌套审计 + 制式转换 + 审阅切片 + 标签体系迁移 + 遮盖导出）
   validation.py      # 批注输入校验：策略驱动的入口验证器（文本长度来源 / 码点区间 / 非空 label / id 类型与唯一性作用域 / 额外字段保留 / 错误前缀）
   migration.py       # 迁移核心：匹配块平移、原文搜索、上下文 Levenshtein 裁决
   arbitration.py     # 仲裁核心：二分图连通分量分组、整组决策校验与导出
@@ -625,6 +696,7 @@ app/
   units.py           # 制式转换核心：一次遍历建立三套字符边界映射、边界校验与偏移换算
   review.py          # 审阅切片核心：顺序装箱、窗口均分与边界余量转移、JSONL 导出、审阅结果校验回导
   relabel.py         # 标签体系迁移核心：规则集校验（目标标签 / 正则 / 回退约束）、迁移链求值（循环与缺规则检测）、导出重算
+  redaction.py       # 遮盖导出核心：命中区间相接 / 重叠合并、遮盖标记替换、跨区批注可见片段拆分与新码点坐标换算
   static/            # 原生 HTML/CSS/JS 前端（index.html 迁移页、arbitrate.html 仲裁页、sequence.html 序列标注页、nesting.html 嵌套审计页、units.html 制式转换页、review.html 审阅切片页、relabel.html 标签体系迁移页）
 tests/
   test_migration.py
@@ -634,6 +706,7 @@ tests/
   test_units.py
   test_review.py
   test_relabel.py
+  test_redaction.py
   test_validation.py
 Dockerfile
 docker-compose.yml
